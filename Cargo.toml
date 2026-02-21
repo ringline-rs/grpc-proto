@@ -1,0 +1,18 @@
+[package]
+name = "grpc-proto"
+version = "0.0.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ringline-rs/grpc-proto"
+description = "gRPC protocol framing layer"
+readme = "README.md"
+keywords = ["grpc", "protocol", "http2"]
+categories = ["network-programming", "parsing"]
+
+[features]
+default = ["tls"]
+tls = ["http2-proto/tls"]
+
+[dependencies]
+bytes = "1"
+http2-proto = { version = "0.0.1", path = "../http2-proto", default-features = false }
