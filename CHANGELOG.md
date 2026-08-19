@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.2] - 2026-08-19
+
 ### Fixed
 
 - `encode_message` and `encode_message_with_compression` reject a message
