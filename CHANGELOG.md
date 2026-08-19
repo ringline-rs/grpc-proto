@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.0.2] - 2026-08-19
 
+### Changed
+
+- Requires `http2-proto` 0.0.2, which fixes a flow-control window overflow
+  reachable from three well-formed WINDOW_UPDATE frames and an HPACK integer
+  overflow on 32-bit targets. Every `0.0.x` is mutually incompatible in Cargo,
+  so the previous `0.0.1` requirement would have excluded those fixes.
+
 ### Fixed
 
 - `encode_message` and `encode_message_with_compression` reject a message

@@ -15,4 +15,4 @@ tls = ["http2-proto/tls"]
 
 [dependencies]
 bytes = "1"
-http2-proto = { version = "0.0.1", default-features = false }
+http2-proto = { version = "0.0.2", default-features = false }
