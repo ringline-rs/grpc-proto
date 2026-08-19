@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `encode_message` and `encode_message_with_compression` reject a message
+  longer than `u32::MAX` instead of silently truncating the length prefix. The
+  gRPC prefix is a `u32`, so `data.len() as u32` wrapped: the receiver would
+  read a short message and then treat the remainder as the next frame's header,
+  desynchronising the stream. `decode_message` already enforced
+  `MAX_MESSAGE_SIZE`; the encode side enforced nothing.
+
 ## [0.0.1] - 2026-02-21
 
 ### Added
