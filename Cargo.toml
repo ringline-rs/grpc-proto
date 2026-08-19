@@ -9,6 +9,9 @@ readme = "README.md"
 keywords = ["grpc", "protocol", "http2"]
 categories = ["network-programming", "parsing"]
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
 [features]
 default = ["tls"]
 tls = ["http2-proto/tls"]

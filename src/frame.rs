@@ -14,6 +14,54 @@ pub const HEADER_SIZE: usize = 5;
 /// Maximum message size (4MB default, matches gRPC default).
 pub const MAX_MESSAGE_SIZE: usize = 4 * 1024 * 1024;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FrameClassification {
+    Incomplete,
+    TooLarge {
+        length: usize,
+    },
+    Complete {
+        compressed: bool,
+        length: usize,
+        total_size: usize,
+    },
+}
+
+fn encode_header(length: u32, compressed: bool) -> [u8; HEADER_SIZE] {
+    let length = length.to_be_bytes();
+    [
+        u8::from(compressed),
+        length[0],
+        length[1],
+        length[2],
+        length[3],
+    ]
+}
+
+fn classify_frame(buf: &[u8]) -> FrameClassification {
+    if buf.len() < HEADER_SIZE {
+        return FrameClassification::Incomplete;
+    }
+
+    let compressed = buf[0] != 0;
+    let length = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
+
+    if length > MAX_MESSAGE_SIZE {
+        return FrameClassification::TooLarge { length };
+    }
+
+    let total_size = HEADER_SIZE + length;
+    if buf.len() < total_size {
+        return FrameClassification::Incomplete;
+    }
+
+    FrameClassification::Complete {
+        compressed,
+        length,
+        total_size,
+    }
+}
+
 /// Encode a message into gRPC wire format.
 ///
 /// Returns the encoded message with the length prefix.
@@ -25,11 +73,7 @@ pub fn encode_message(data: &[u8]) -> Bytes {
 pub fn encode_message_with_compression(data: &[u8], compressed: bool) -> Bytes {
     let mut buf = BytesMut::with_capacity(HEADER_SIZE + data.len());
 
-    // Compressed flag
-    buf.put_u8(if compressed { 1 } else { 0 });
-
-    // Message length (big-endian)
-    buf.put_u32(data.len() as u32);
+    buf.put_slice(&encode_header(data.len() as u32, compressed));
 
     // Message data
     buf.put_slice(data);
@@ -42,27 +86,18 @@ pub fn encode_message_with_compression(data: &[u8], compressed: bool) -> Bytes {
 /// Returns `Ok(Some((message, compressed)))` if a complete message was decoded,
 /// `Ok(None)` if more data is needed, or `Err` on protocol error.
 pub fn decode_message(buf: &mut BytesMut) -> io::Result<Option<(Bytes, bool)>> {
-    if buf.len() < HEADER_SIZE {
-        return Ok(None);
-    }
-
-    // Peek at header without consuming
-    let compressed = buf[0] != 0;
-    let length = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize;
-
-    // Validate message size
-    if length > MAX_MESSAGE_SIZE {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("message too large: {} bytes", length),
-        ));
-    }
-
-    // Check if we have the complete message
-    let total_size = HEADER_SIZE + length;
-    if buf.len() < total_size {
-        return Ok(None);
-    }
+    let (compressed, length) = match classify_frame(buf) {
+        FrameClassification::Incomplete => return Ok(None),
+        FrameClassification::TooLarge { length } => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("message too large: {} bytes", length),
+            ));
+        }
+        FrameClassification::Complete {
+            compressed, length, ..
+        } => (compressed, length),
+    };
 
     // Consume header
     buf.advance(HEADER_SIZE);
@@ -122,6 +157,89 @@ impl MessageDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn incomplete_frame_classification_reports_incomplete() {
+        let input = [0, 0, 0, 0, 3, 0xaa, 0xbb];
+
+        assert_eq!(classify_frame(&input), FrameClassification::Incomplete);
+    }
+
+    #[test]
+    fn complete_frame_classification_identifies_exact_payload_extent() {
+        let input = [1, 0, 0, 0, 2, 0xaa, 0xbb, 0xcc];
+
+        assert_eq!(
+            classify_frame(&input),
+            FrameClassification::Complete {
+                compressed: true,
+                length: 2,
+                total_size: 7,
+            }
+        );
+    }
+
+    #[test]
+    fn oversized_frame_classification_reports_the_declared_length() {
+        let length = (MAX_MESSAGE_SIZE as u32 + 1).to_be_bytes();
+        let input = [0, length[0], length[1], length[2], length[3]];
+
+        assert_eq!(
+            classify_frame(&input),
+            FrameClassification::TooLarge {
+                length: MAX_MESSAGE_SIZE + 1,
+            }
+        );
+    }
+
+    #[test]
+    fn encoded_header_roundtrips_through_classification() {
+        let header = encode_header(3, true);
+        let mut input = Vec::from(header);
+        input.extend_from_slice(&[0xaa, 0xbb, 0xcc]);
+
+        assert_eq!(
+            classify_frame(&input),
+            FrameClassification::Complete {
+                compressed: true,
+                length: 3,
+                total_size: 8,
+            }
+        );
+    }
+
+    #[test]
+    fn incomplete_decode_preserves_buffer_bytes() {
+        let mut input = BytesMut::from(&[0, 0, 0, 0, 3, 0xaa, 0xbb][..]);
+        let before = input.clone();
+
+        assert!(decode_message(&mut input).unwrap().is_none());
+        assert_eq!(input, before);
+    }
+
+    #[test]
+    fn oversized_decode_preserves_buffer_bytes() {
+        let length = (MAX_MESSAGE_SIZE as u32 + 1).to_be_bytes();
+        let mut input = BytesMut::from(&[0, length[0], length[1], length[2], length[3]][..]);
+        let before = input.clone();
+
+        assert_eq!(
+            decode_message(&mut input).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(input, before);
+    }
+
+    #[test]
+    fn successful_decode_returns_exact_payload_and_leaves_trailing_bytes() {
+        let mut input = BytesMut::from(&[1, 0, 0, 0, 2, 0xaa, 0xbb, 0xcc, 0xdd][..]);
+
+        let (payload, compressed) = decode_message(&mut input).unwrap().unwrap();
+
+        assert_eq!(payload.as_ref(), &[0xaa, 0xbb]);
+        assert!(compressed);
+        assert_eq!(input.as_ref(), &[0xcc, 0xdd]);
+    }
 
     #[test]
     fn test_encode_empty_message() {
@@ -303,5 +421,98 @@ mod tests {
         let (message, compressed) = decode_message(&mut buf).unwrap().unwrap();
         assert!(compressed);
         assert_eq!(&message[..], data);
+    }
+}
+
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    const MAX_PROOF_PAYLOAD: usize = 8;
+    const MAX_TRAILING_BYTES: usize = 3;
+    const MAX_PROOF_INPUT: usize = HEADER_SIZE + MAX_PROOF_PAYLOAD + MAX_TRAILING_BYTES;
+
+    #[kani::proof]
+    fn classify_bounded_input_never_panics() {
+        let bytes: [u8; MAX_PROOF_INPUT] = kani::any();
+        let available: usize = kani::any();
+        kani::assume(available <= MAX_PROOF_INPUT);
+
+        let _ = classify_frame(&bytes[..available]);
+    }
+
+    #[kani::proof]
+    fn classification_matches_bounded_wire_specification() {
+        let bytes: [u8; MAX_PROOF_INPUT] = kani::any();
+        let available: usize = kani::any();
+        kani::assume(available <= MAX_PROOF_INPUT);
+
+        let classification = classify_frame(&bytes[..available]);
+        if available < HEADER_SIZE {
+            assert_eq!(classification, FrameClassification::Incomplete);
+            return;
+        }
+
+        let declared = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
+        if declared > MAX_MESSAGE_SIZE {
+            assert_eq!(
+                classification,
+                FrameClassification::TooLarge { length: declared }
+            );
+        } else if available < HEADER_SIZE + declared {
+            assert_eq!(classification, FrameClassification::Incomplete);
+        } else {
+            assert_eq!(
+                classification,
+                FrameClassification::Complete {
+                    compressed: bytes[0] != 0,
+                    length: declared,
+                    total_size: HEADER_SIZE + declared,
+                }
+            );
+        }
+    }
+
+    #[kani::proof]
+    fn successful_classification_has_exact_payload_extent() {
+        let bytes: [u8; MAX_PROOF_INPUT] = kani::any();
+        let available: usize = kani::any();
+        kani::assume(available <= MAX_PROOF_INPUT);
+        kani::assume(available >= HEADER_SIZE);
+        kani::assume(bytes[0] <= 1);
+
+        if let FrameClassification::Complete {
+            compressed,
+            length,
+            total_size,
+        } = classify_frame(&bytes[..available])
+        {
+            let declared = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
+            assert_eq!(length, declared);
+            assert_eq!(total_size, HEADER_SIZE + declared);
+            assert!(total_size <= available);
+            assert_eq!(compressed, bytes[0] == 1);
+        }
+    }
+
+    #[kani::proof]
+    fn bounded_header_encode_decode_roundtrip() {
+        let length: u32 = kani::any();
+        let compressed: bool = kani::any();
+        kani::assume(length as usize <= MAX_PROOF_PAYLOAD);
+
+        let header = encode_header(length, compressed);
+        let mut frame = [0_u8; HEADER_SIZE + MAX_PROOF_PAYLOAD];
+        frame[..HEADER_SIZE].copy_from_slice(&header);
+        let frame_len = HEADER_SIZE + length as usize;
+
+        assert_eq!(
+            classify_frame(&frame[..frame_len]),
+            FrameClassification::Complete {
+                compressed,
+                length: length as usize,
+                total_size: frame_len,
+            }
+        );
     }
 }
