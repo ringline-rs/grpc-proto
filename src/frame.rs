@@ -442,10 +442,11 @@ mod verification {
     }
 
     #[kani::proof]
-    fn classification_matches_bounded_wire_specification() {
+    fn valid_flags_match_bounded_wire_specification() {
         let bytes: [u8; MAX_PROOF_INPUT] = kani::any();
         let available: usize = kani::any();
         kani::assume(available <= MAX_PROOF_INPUT);
+        kani::assume(available < HEADER_SIZE || bytes[0] <= 1);
 
         let classification = classify_frame(&bytes[..available]);
         if available < HEADER_SIZE {

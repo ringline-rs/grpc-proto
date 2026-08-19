@@ -25,7 +25,10 @@ header decision that controls those mutations.
 
 ## Reproducible random comparison
 
-The deterministic comparison runner uses the same payload/trailing/flag bounds:
+The deterministic comparison runner uses the same 16-byte input bound. It
+stratifies samples across short headers, incomplete bodies, oversized lengths,
+valid successes with trailing bytes, and arbitrary raw inputs (including
+invalid compression flags):
 
 ```console
 cargo run --release --example frame_decode_bench -- 1000000
@@ -39,20 +42,25 @@ than a performance guarantee:
 - Kani 0.67.0, warm build plus four proofs: 10.65 seconds. Individual CBMC
   verification times were 0.25--0.54 seconds per harness. The initial cold run
   before the final proof refinement took 16.46 seconds.
-- Seeded runner, already compiled: 1,000,000 frames in 0.101 seconds
-  (9,898,655 frames/second).
+- Seeded runner, already compiled: 1,000,000 cases in 0.080 seconds
+  (12,547,505 cases/second): 258,626 short headers, 200,110 incomplete
+  bodies, 341,264 oversized frames, and 200,000 successes. The run included
+  386,724 inputs with invalid compression flags.
 - Seed: `0x6b616e6967727063`; release build; development host on 2026-08-18.
 
-The runner measures real `BytesMut` allocation and mutation at high throughput,
-but samples only one million seeded cases. Kani is slower because it explores
-all bounded classifications and proves the assertions; it intentionally models
-the pure classifier rather than `BytesMut` allocation internals.
+The runner checks preservation for incomplete/error results and exact payload,
+consumption, compression (for flags 0 and 1), and trailing bytes for successes.
+It measures real `BytesMut` allocation and mutation at high throughput, but one
+million seeded cases remain samples. Kani is slower because it exhaustively
+explores all bounded classifications and proves the assertions; it intentionally
+models the pure classifier rather than `BytesMut` allocation internals.
 
 ## Existing semantics outside the proof contract
 
-- Decoding currently treats every nonzero compression flag as compressed. The
-  semantic proofs assume the valid wire values 0 and 1 and do not endorse other
-  values.
+- Decoding currently treats every nonzero compression flag as compressed. Only
+  the panic proof and random runner exercise invalid values; neither asserts a
+  desired compression meaning for them. Semantic proofs assume valid flags 0
+  and 1.
 - Encoding casts `data.len()` to `u32`. Inputs larger than `u32::MAX` would have
   a truncated wire length. This PR preserves the public infallible API and does
   not claim a roundtrip proof for such inputs.
