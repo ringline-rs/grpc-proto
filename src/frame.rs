@@ -70,10 +70,30 @@ pub fn encode_message(data: &[u8]) -> Bytes {
 }
 
 /// Encode a message with explicit compression flag.
+///
+/// # Panics
+///
+/// Panics if `data` is longer than `u32::MAX`. The gRPC length prefix is a
+/// `u32`, so a longer message cannot be represented: the length would wrap and
+/// the receiver would read a short message and then treat the remainder as the
+/// next frame's header, desynchronising the stream. Rejecting is the only safe
+/// option once the caller has handed over such a buffer.
+///
+/// Note this is deliberately `u32::MAX` rather than [`MAX_MESSAGE_SIZE`]:
+/// [`decode_message`] enforces the latter, but encoding has historically
+/// accepted any size below 4 GiB and tightening that here would reject
+/// messages callers can legitimately produce today.
 pub fn encode_message_with_compression(data: &[u8], compressed: bool) -> Bytes {
+    let length = u32::try_from(data.len()).unwrap_or_else(|_| {
+        panic!(
+            "message of {} bytes exceeds the u32 gRPC length prefix",
+            data.len()
+        )
+    });
+
     let mut buf = BytesMut::with_capacity(HEADER_SIZE + data.len());
 
-    buf.put_slice(&encode_header(data.len() as u32, compressed));
+    buf.put_slice(&encode_header(length, compressed));
 
     // Message data
     buf.put_slice(data);
@@ -239,6 +259,30 @@ mod tests {
         assert_eq!(payload.as_ref(), &[0xaa, 0xbb]);
         assert!(compressed);
         assert_eq!(input.as_ref(), &[0xcc, 0xdd]);
+    }
+
+    #[test]
+    fn encode_accepts_sizes_up_to_the_decode_limit() {
+        // The u32 guard must not reject anything a caller can legitimately
+        // produce. Exercise the boundary decode_message enforces, plus the
+        // sizes either side of it, and confirm each round-trips.
+        for len in [0usize, 1, HEADER_SIZE, 65_535, MAX_MESSAGE_SIZE] {
+            let data = vec![0xABu8; len];
+            let encoded = encode_message(&data);
+            assert_eq!(encoded.len(), HEADER_SIZE + len, "len {len}");
+            assert_eq!(
+                u32::from_be_bytes([encoded[1], encoded[2], encoded[3], encoded[4]]) as usize,
+                len,
+                "length prefix wrong for len {len}"
+            );
+
+            let mut buf = BytesMut::from(&encoded[..]);
+            let (message, compressed) = decode_message(&mut buf)
+                .expect("decode must not error")
+                .expect("decode must be complete");
+            assert!(!compressed);
+            assert_eq!(message.len(), len, "round trip lost bytes at len {len}");
+        }
     }
 
     #[test]

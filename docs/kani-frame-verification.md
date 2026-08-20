@@ -61,6 +61,8 @@ models the pure classifier rather than `BytesMut` allocation internals.
   the panic proof and random runner exercise invalid values; neither asserts a
   desired compression meaning for them. Semantic proofs assume valid flags 0
   and 1.
-- Encoding casts `data.len()` to `u32`. Inputs larger than `u32::MAX` would have
-  a truncated wire length. This PR preserves the public infallible API and does
-  not claim a roundtrip proof for such inputs.
+- Encoding rejects inputs larger than `u32::MAX` before constructing the header,
+  because the wire length cannot represent them. The bounded roundtrip proof
+  covers every encoded length in its 0-through-8-byte payload domain; a concrete
+  test confirms the checked conversion does not reject sizes through the decoder
+  limit.
