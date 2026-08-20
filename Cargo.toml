@@ -2,6 +2,9 @@
 name = "grpc-proto"
 version = "0.0.2"
 edition = "2024"
+# Minimum supported Rust version. Edition 2024 already required 1.85; this
+# records the real floor rather than leaving it implicit.
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ringline-rs/grpc-proto"
 description = "gRPC protocol framing layer"
